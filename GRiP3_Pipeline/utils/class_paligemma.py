@@ -2,6 +2,7 @@ import sys
 import os
 import re
 import functools
+import logging
 from typing import List, Tuple
 
 # ---- Libraries for VAE & annotation ----
@@ -20,6 +21,10 @@ from huggingface_hub import hf_hub_download
 import torch
 from peft import PeftModel, PeftConfig
 from transformers import AutoModelForPreTraining, PaliGemmaProcessor
+
+from .paths import SCENE_DIR
+
+logger = logging.getLogger(__name__)
 
 
 class PaliGemmaInference:
@@ -71,7 +76,7 @@ class PaliGemmaInference:
 
     def _download_vae_npz_if_needed(self):
         if not os.path.exists(self.local_vae_path):
-            print("Downloading vae-oid.npz from Hugging Face...")
+            logger.info("Downloading vae-oid.npz from Hugging Face...")
             try:
                 hf_hub_download(
                     repo_id="google/paligemma-hf",
@@ -79,15 +84,15 @@ class PaliGemmaInference:
                     repo_type="space",
                     local_dir="."
                 )
-                print("Downloaded vae-oid.npz successfully.")
+                logger.info("Downloaded vae-oid.npz successfully.")
             except Exception as e:
-                print(f"Failed to download vae-oid.npz: {e}")
+                logger.error("Failed to download vae-oid.npz: %s", e)
                 sys.exit(1)
         else:
-            print("vae-oid.npz already exists. Skipping download.")
+            logger.info("vae-oid.npz already exists. Skipping download.")
 
     def _load_model(self):
-        print(f"Loading PEFT model from: {self.peft_model_path}")
+        logger.info("Loading PEFT model from: %s", self.peft_model_path)
         config = PeftConfig.from_pretrained(self.peft_model_path)
         base_model = AutoModelForPreTraining.from_pretrained(self.base_model_id)
         self.model = PeftModel.from_pretrained(base_model, self.peft_model_path)
@@ -198,7 +203,7 @@ class PaliGemmaInference:
           - "segmentation": produces segmentation overlays and optionally saves the label mask.
         """
         if not os.path.exists(image_path):
-            print(f"ERROR: image not found at {image_path}")
+            logger.error("image not found at %s", image_path)
             sys.exit(1)
 
         # Load image
@@ -217,8 +222,7 @@ class PaliGemmaInference:
         with torch.no_grad():
             output = self.model.generate(**inputs, max_length=2048, do_sample=False)
         decoded_output = self.processor.decode(output[0], skip_special_tokens=True)
-        print("\nDecoded Output:")
-        print(decoded_output)
+        logger.info("Decoded output: %s", decoded_output)
 
         # For "command" mode, return the text only.
         if mode == "command":
@@ -240,20 +244,23 @@ class PaliGemmaInference:
             # Parse detections (expecting 4 <loc####> tokens and an optional class).
             detections = self._convert_to_detections_detect(cleaned_text, (w, h), classes or [])
             if len(detections) == 0:
-                print("No bounding boxes found for detect mode.")
+                logger.warning("No bounding boxes found for detect mode.")
                 return detections
 
             annotated_image = self._annotate_detection(np.array(pil_image), detections)
             if output_path:
                 PIL.Image.fromarray(annotated_image).save(output_path)
-                print(f"Bounding-box-only image saved at: {output_path}")
+                logger.info("Bounding-box-only image saved at: %s", output_path)
 
             # ---------------- New utils: Compute & Save 3D Target Poses ----------------
             # Load depth image (assumed in meters)
-            depth_path = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/depth.npy"
+            depth_path = str(SCENE_DIR / "depth.npy")
             depth_image = np.load(depth_path)
 
             # Provided extrinsics (camera_pose) and intrinsic parameters.
+            # NOTE: these are hand-eye calibration values for the original camera
+            # mount. Re-measure them for your own cell (ideally load from the
+            # scene's meta_data.pkl instead of hardcoding here).
             camera_pose = np.array([[7.7483457e-01, -4.2044988e-01, 4.7207338e-01, -1.5715596e-01],
                                     [-6.3216394e-01, -5.1492232e-01, 5.7898515e-01, -5.9072340e-01],
                                     [-3.5311221e-04, -7.4704546e-01, -6.6477287e-01, 2.2176746e-01],
@@ -285,14 +292,14 @@ class PaliGemmaInference:
                 # Transform the camera coordinates to robot base frame.
                 robot_coords = camera_pose @ cam_coords_hom
                 robot_coords = robot_coords.flatten()[:3]
-                print(f"Detection {i + 1} center in robot base coordinates: {robot_coords}")
+                logger.info("Detection %d center in robot base coordinates: %s", i + 1, robot_coords)
                 target_poses.append(robot_coords.tolist())
 
             # Save the target poses to a JSON file.
-            json_save_path = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/target_pose.json"
+            json_save_path = str(SCENE_DIR / "target_pose.json")
             with open(json_save_path, "w") as json_file:
                 json.dump(target_poses, json_file, indent=2)
-            print(f"Target poses saved to: {json_save_path}")
+            logger.info("Target poses saved to: %s", json_save_path)
             # -----------------------------------------------------------------------------
 
             return detections
@@ -303,7 +310,7 @@ class PaliGemmaInference:
         if output_path:
             annotated_image = self._annotate_image(np.array(pil_image), detections)
             PIL.Image.fromarray(annotated_image).save(output_path)
-            print(f"Annotated image (segmentation) saved at: {output_path}")
+            logger.info("Annotated image (segmentation) saved at: %s", output_path)
         if save_label_mask:
             self._create_and_save_label_mask_auto(
                 detections=detections,
@@ -454,22 +461,22 @@ class PaliGemmaInference:
                                          ) -> None:
         w, h = pil_image.size
         label_mask = np.full((h, w), 0, dtype=np.uint8)
-        print(f"Sfondo => label_value=0")
+        logger.debug("Background => label_value=0")
         if len(detections) == 0:
-            print("Nessun detection, maschera = 0 ovunque (sfondo).")
+            logger.warning("No detections; mask = 0 everywhere (background).")
             if label_mask_path is None:
                 base, ext = os.path.splitext(image_path)
                 label_mask_path = base + "_mask.png"
             cv2.imwrite(label_mask_path, label_mask)
-            print(f"Mask salvata in: {label_mask_path}")
+            logger.info("Mask saved at: %s", label_mask_path)
             return
         for i in range(len(detections)):
             detection_mask = detections.mask[i]
             label_value = 101 + i
             class_name = detections["class_name"][i]
-            print(f"Oggetto {i + 1}: '{class_name}' => label_value={label_value}")
+            logger.info("Object %d: '%s' => label_value=%d", i + 1, class_name, label_value)
             label_mask[detection_mask] = label_value
         if label_mask_path is None:
             label_mask_path = os.path.join(os.path.dirname(image_path), "seg.png")
         cv2.imwrite(label_mask_path, label_mask)
-        print(f"Mask salvata in: {label_mask_path}")
+        logger.info("Mask saved at: %s", label_mask_path)

@@ -1,4 +1,4 @@
-clear# OS / editor
+# OS / editor
 *~
 *.swp
 .vscode/
@@ -21,7 +21,7 @@ dist/
 tmp/
 temp/
 
-# Big artifacts (common)
+# Big artifacts / model weights
 data/
 datasets/
 checkpoints/
@@ -30,26 +30,15 @@ weights/
 *.pt
 *.ckpt
 *.onnx
-*.npz
+# NOTE: *.npz is intentionally NOT ignored globally — the pipeline ships and
+# relies on small .npz assets (e.g. vae-oid.npz, full_object_pointcloud.npz).
+# Ignore only large generated weight archives explicitly if needed.
 
 # Jupyter
 .ipynb_checkpoints/
 
+# Per-run scene artifacts (regenerated each run; keep the MX sample in git)
+GRiP3_Pipeline/sample_data/real_world/XY/
 
-GRiP3_Pipeline/sample_data/real_world/XY/*.json
-GRiP3_Pipeline/sample_data/real_world/XY/*.ply
-GRiP3_Pipeline/sample_data/real_world/XY/*.png
-GRiP3_Pipeline/sample_data/real_world/XY/*.json
-GRiP3_Pipeline/sample_data/real_world/XY/*.ply
-GRiP3_Pipeline/sample_data/real_world/XY/*.png
-
-# Runtime outputs / sample artifacts
-GRiP3_Pipeline/sample_data/real_world/XY/*.json
-GRiP3_Pipeline/sample_data/real_world/XY/*.ply
-GRiP3_Pipeline/sample_data/real_world/XY/*.png
-
-# Ignore local model weights
-OverlapPredator/weights/*.pth
-
-# Ignore local model weights
+# OverlapPredator local weights (download separately)
 OverlapPredator/weights/

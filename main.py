@@ -1,13 +1,24 @@
+"""VL-GRiP3 pipeline entry point.
+
+Captures an RGB-D scene, grounds the commanded object with PaliGemma, registers
+the CAD model with OverlapPredator, plans grasps with M2T2, decodes a high-level
+action script and (optionally) executes it on the UR robot.
+
+Examples:
+    python main.py                         # full pipeline, keyboard prompt
+    python main.py --voice                 # use Whisper speech-to-text
+    python main.py --no-capture            # reuse existing scene files
+    python main.py --no-robot              # dry-run: never command the robot
+"""
+import argparse
+import logging
 import os
 import re
-import time
 import sys
-from GRiP3_Pipeline.utils.class_m2t2 import M2T2Inference
-from GRiP3_Pipeline.utils.class_robot_library import UR3Commands
-from GRiP3_Pipeline.utils.class_get_snap_mm import RealSenseCapture
-from GRiP3_Pipeline.utils.class_predator import PredatorPipeline
-import torch  # Per svuotare la cache GPU (se usi PyTorch)
-from GRiP3_Pipeline.utils.class_paligemma import PaliGemmaInference
+import time
+
+logger = logging.getLogger("vl_grip3.main")
+
 
 def process_user_prompt(user_prompt: str):
     # 1) Extract the command verb and object for segmentation.
@@ -64,144 +75,22 @@ def process_user_prompt(user_prompt: str):
 
     return object_seg_prompt, None, command_prompt
 
-if __name__ == "__main__":
-    # 1. Capture the scene using RealSense.
-    capture_dir = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX"
-    rgb_filename = "rgb.png"
-    depth_filename = "depth.npy"
 
-    capture = RealSenseCapture(
-        save_directory=capture_dir,
-        rgb_filename=rgb_filename,
-        depth_filename=depth_filename,
-        resolution_width=640,
-        resolution_height=480,
-        fps=30
-    )
-    print("Starting scene capture...")
-    capture.run_capture()
+def get_user_prompt(use_voice: bool) -> str:
+    """Acquire the natural-language command from keyboard or Whisper."""
+    if use_voice:
+        from GRiP3_Pipeline.utils.class_whisper import WhisperTranscriber
+        transcriber = WhisperTranscriber()
+        while True:
+            user_prompt = transcriber.record_and_transcribe()
+            logger.info("Transcribed prompt: %s", user_prompt)
+            if input("If this transcription is OK, press Enter; otherwise type 'R' to re-record: ").strip().lower() != 'r':
+                return user_prompt
+    return input("Enter your prompt (e.g. 'move tac2 in red target'): ")
 
-    # 2. Process user prompt.
-    user_prompt = input("Enter your prompt (es. 'move the black cube to the location defined as ...'): ")
-    seg_prompt, seg_target_prompt, cmd_prompt = process_user_prompt(user_prompt)
-    print("Segmentation prompt:", seg_prompt)
-    print("Segmentation Target prompt:", seg_target_prompt)
-    print("Command prompt:", cmd_prompt)
 
-    # --- Decide which TAC object to use for registration (tac1/tac2/tac3) ---
-    m = re.search(r"\b(tac1|tac2|tac3)\b", user_prompt, re.IGNORECASE)
-    if m:
-        cad_name = m.group(1).lower()  # "tac1" / "tac2" / "tac3"
-        print("Detected object for registration:", cad_name)
-    else:
-        print("\n[ERROR] No 'tac1', 'tac2' or 'tac3' found in the prompt.")
-        print("Please specify which tac to move, e.g.: 'move tac2 in red target'.")
-        sys.exit(1)
-
-    image_path = os.path.join(capture_dir, rgb_filename)
-    image_path_action_inf = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/utils/dataset/train_basic_cmd/1.jpg"
-    seg_output_path = os.path.join(capture_dir, "segmentation_overlay.png")
-    seg_output_path_target = os.path.join(capture_dir, "detection_target_overlay.png")
-    classes = ["cylinder", "cube", "prism", "triangle"]
-
-    # 3. Run segmentation inference.
-    seg_model_path = "GRiP3_Pipeline/checkpoints/paligemma-segm-module"
-    inferencer = PaliGemmaInference(
-        peft_model_path=seg_model_path,
-        base_model_id="google/paligemma-3b-mix-448"
-    )
-
-    print("Running inference for segmentation...")
-    seg_detections = inferencer.infer(
-        prompt=seg_prompt,
-        image_path=image_path,
-        output_path=seg_output_path,
-        classes=classes,
-        mode="segmentation"
-    )
-
-    if seg_target_prompt:
-        seg_detections_target = inferencer.infer(
-            prompt=seg_target_prompt,
-            image_path=image_path,
-            output_path=seg_output_path_target,
-            classes=classes,
-            mode="detect"
-        )
-
-    del inferencer
-    torch.cuda.empty_cache()
-    print("Segmentation model unloaded. GPU cache cleared.")
-
-    # 4. Registration via PredatorPipeline
-    input("Press Enter to proceed with registration...")
-
-    cfg_base = "/home/au-robotics/MircoProjects/VL_GRiP3/OverlapPredator/configs/test"
-
-    cad_cfg_map = {
-        "tac1": os.path.join(cfg_base, "vl_grip3_tac1.yaml"),
-        "tac2": os.path.join(cfg_base, "vl_grip3_tac2.yaml"),
-        "tac3": os.path.join(cfg_base, "vl_grip3_tac3.yaml"),
-    }
-
-    predator_cfg_path = cad_cfg_map.get(cad_name)
-    if predator_cfg_path is None:
-        print(f"[ERROR] No Predator config found for cad_name='{cad_name}'.")
-        sys.exit(1)
-
-    print("Using Predator config:", predator_cfg_path)
-
-    while True:
-        pipeline = PredatorPipeline(
-            sample_dir=capture_dir,
-            predator_script="/home/au-robotics/MircoProjects/VL_GRiP3/OverlapPredator/scripts/demo_save.py",
-            predator_cfg=predator_cfg_path,
-            label=101,
-        )
-        pipeline.run()
-        print(f"Registration completed. NPZ available in: {pipeline.npz_path}")
-        repeat = input("Type 'R' to repeat or press Enter to continue: ")
-        if repeat.lower() != 'r':
-            break
-
-    # 5. Grasping.
-    input("Press Enter to proceed with M2T2 inference:")
-    while True:
-        m2t2_inference = M2T2Inference()
-        m2t2_inference.run()
-        repeat = input("If the visualization is satisfactory, press Enter; otherwise type 'R' to repeat the inference: ")
-        if repeat.lower() != 'r':
-            break
-
-    # 6. Run command inference.
-    cmd_model_path = "GRiP3_Pipeline/checkpoints/paligemma-action-module"
-    inferencer_cmd = PaliGemmaInference(
-        peft_model_path=cmd_model_path,
-        base_model_id="google/paligemma-3b-mix-448"
-    )
-
-    print("Running inference for command...")
-    cmd_detections = inferencer_cmd.infer(
-        prompt=cmd_prompt,
-        image_path=image_path_action_inf,
-        classes=classes,
-        mode="command"
-    )
-    # Optionally: print("Comando decodificato:", cmd_detections)
-
-    input("Press Enter to proceed with grasping...")
-
-    # 6. Execute the command on the robot.
-    from rtde_control import RTDEControlInterface
-    from rtde_receive import RTDEReceiveInterface
-
-    ur3 = UR3Commands()
-
-    # Example command string:
-    # "connect ; approach ; gripper open ; grasp ; gripper close ; approach ; target(red) ; gripper open ; home pose ; disconnect"
-    command_line = cmd_detections.split('\n')[-1].strip()
-    print("Sequence of commands to execute:", command_line)
-
+def execute_command_sequence(ur3, command_line: str):
+    """Map the decoded high-level command string onto UR3Commands calls."""
     command_mapping = {
         "gripper open": ur3.gripper_open,
         "gripper close": ur3.gripper_close,
@@ -209,20 +98,17 @@ if __name__ == "__main__":
         "approach": ur3.approach,
         "home pose": ur3.move_to_home,
     }
-
     commands = [cmd.strip() for cmd in command_line.split(';') if cmd.strip()]
 
     for cmd in commands:
         normalized_cmd = cmd.lower().strip()
 
         if normalized_cmd == "connect":
-            print("Running the command: connect")
+            logger.info("Running the command: connect")
             ur3.connect()
-
         elif normalized_cmd == "disconnect":
-            print("Executing the command: disconnect")
+            logger.info("Executing the command: disconnect")
             ur3.disconnect()
-
         elif normalized_cmd.startswith("positive(") or normalized_cmd.startswith("negative("):
             pattern_shift = r"^(positive|negative)\(\s*([xyz])\s*,\s*([\d\.]+)\s*\)$"
             match_shift = re.match(pattern_shift, normalized_cmd, re.IGNORECASE)
@@ -231,32 +117,168 @@ if __name__ == "__main__":
                 try:
                     offset = float(offset_str)
                 except ValueError:
-                    print(f"Invalid offset value in: {cmd}")
+                    logger.warning("Invalid offset value in: %s", cmd)
                     continue
-                print(f"Executing the command: {cmd}")
+                logger.info("Executing the command: %s", cmd)
                 if shift_type.lower() == "positive":
                     ur3.positive_shift(axis, offset)
                 else:
                     ur3.negative_shift(axis, offset)
             else:
-                print(f"Invalid shift command format: {cmd}")
-
+                logger.warning("Invalid shift command format: %s", cmd)
         elif normalized_cmd.startswith("target("):
-            # Ignore any parameter. Just call move_to_target()
-            print("Executing the target command (ignoring parameter)")
+            logger.info("Executing the target command (ignoring parameter)")
             ur3.move_to_target()
-
         elif normalized_cmd == "target":
-            print("Executing the target command")
+            logger.info("Executing the target command")
             ur3.move_to_target()
-
         elif normalized_cmd in command_mapping:
-            print(f"Executing the command: {cmd}")
+            logger.info("Executing the command: %s", cmd)
             command_mapping[normalized_cmd]()
-
         else:
-            print(f"Command '{cmd}' not recognized.")
+            logger.warning("Command '%s' not recognized.", cmd)
 
         time.sleep(0.1)
 
-#WITH JUST KEYBOARD
+
+def parse_args(argv=None):
+    p = argparse.ArgumentParser(description="VL-GRiP3 vision-language grasping pipeline")
+    p.add_argument("--voice", action="store_true",
+                   help="use Whisper speech-to-text for the prompt")
+    p.add_argument("--scene-dir", default=None,
+                   help="scene/working directory (overrides VLGRIP3_SCENE_DIR)")
+    p.add_argument("--no-capture", action="store_true",
+                   help="skip RealSense capture and reuse existing scene files")
+    p.add_argument("--no-robot", action="store_true",
+                   help="dry-run: run the full pipeline but never command the robot")
+    p.add_argument("--log-level", default=None,
+                   help="logging level (DEBUG/INFO/WARNING/...)")
+    return p.parse_args(argv)
+
+
+def main(argv=None):
+    args = parse_args(argv)
+
+    # Propagate the scene-dir override BEFORE importing modules that resolve it.
+    if args.scene_dir:
+        os.environ["VLGRIP3_SCENE_DIR"] = args.scene_dir
+
+    from GRiP3_Pipeline.utils.logging_config import setup_logging
+    setup_logging(args.log_level)
+
+    from GRiP3_Pipeline.utils import paths
+    from GRiP3_Pipeline.utils.class_m2t2 import M2T2Inference
+    from GRiP3_Pipeline.utils.class_robot_library import UR3Commands
+    from GRiP3_Pipeline.utils.class_predator import PredatorPipeline
+    from GRiP3_Pipeline.utils.class_paligemma import PaliGemmaInference
+    import torch
+
+    scene_dir = str(paths.SCENE_DIR)
+    base_model_id = "google/paligemma-3b-mix-448"
+    classes = ["cylinder", "cube", "prism", "triangle"]
+
+    # 1. Capture the scene using RealSense (unless reusing existing files).
+    if args.no_capture:
+        logger.info("Skipping capture; reusing scene files in %s", scene_dir)
+    else:
+        from GRiP3_Pipeline.utils.class_get_snap_mm import RealSenseCapture
+        capture = RealSenseCapture(
+            save_directory=scene_dir,
+            rgb_filename="rgb.png",
+            depth_filename="depth.npy",
+            resolution_width=640,
+            resolution_height=480,
+            fps=30,
+        )
+        logger.info("Starting scene capture...")
+        capture.run_capture()
+
+    # 2. Acquire and parse the user prompt.
+    user_prompt = get_user_prompt(args.voice)
+    logger.info("Prompt received: %s", user_prompt)
+    seg_prompt, seg_target_prompt, cmd_prompt = process_user_prompt(user_prompt)
+    logger.info("Segmentation prompt: %s", seg_prompt)
+    logger.info("Segmentation target prompt: %s", seg_target_prompt)
+    logger.info("Command prompt: %s", cmd_prompt)
+
+    # Decide which TAC object to use for registration (tac1/tac2/tac3).
+    m = re.search(r"\b(tac1|tac2|tac3)\b", user_prompt, re.IGNORECASE)
+    if not m:
+        logger.error("No 'tac1', 'tac2' or 'tac3' found in the prompt. "
+                     "Specify which tac to move, e.g.: 'move tac2 in red target'.")
+        sys.exit(1)
+    cad_name = m.group(1).lower()
+    logger.info("Detected object for registration: %s", cad_name)
+
+    image_path = os.path.join(scene_dir, "rgb.png")
+    image_path_action_inf = str(paths.ACTION_INFER_IMAGE)
+    seg_output_path = os.path.join(scene_dir, "segmentation_overlay.png")
+    seg_output_path_target = os.path.join(scene_dir, "detection_target_overlay.png")
+
+    # 3. Segmentation inference.
+    inferencer = PaliGemmaInference(
+        peft_model_path=str(paths.SEGM_CHECKPOINT),
+        base_model_id=base_model_id,
+    )
+    logger.info("Running inference for segmentation...")
+    inferencer.infer(prompt=seg_prompt, image_path=image_path,
+                     output_path=seg_output_path, classes=classes, mode="segmentation")
+    if seg_target_prompt:
+        inferencer.infer(prompt=seg_target_prompt, image_path=image_path,
+                         output_path=seg_output_path_target, classes=classes, mode="detect")
+    del inferencer
+    torch.cuda.empty_cache()
+    logger.info("Segmentation model unloaded. GPU cache cleared.")
+
+    # 4. Registration via PredatorPipeline.
+    input("Press Enter to proceed with registration...")
+    predator_cfg_path = str(paths.PREDATOR_CFG_DIR / f"vl_grip3_{cad_name}.yaml")
+    logger.info("Using Predator config: %s", predator_cfg_path)
+    while True:
+        pipeline = PredatorPipeline(
+            sample_dir=scene_dir,
+            predator_script=str(paths.PREDATOR_SCRIPT),
+            predator_cfg=predator_cfg_path,
+            label=101,
+        )
+        pipeline.run()
+        logger.info("Registration completed. NPZ available in: %s", pipeline.npz_path)
+        if input("Type 'R' to repeat or press Enter to continue: ").strip().lower() != 'r':
+            break
+
+    # 5. Grasping (M2T2).
+    input("Press Enter to proceed with M2T2 inference:")
+    while True:
+        M2T2Inference().run()
+        if input("If the visualization is satisfactory, press Enter; otherwise type 'R' to repeat: ").strip().lower() != 'r':
+            break
+
+    # 6. Command (action) inference.
+    inferencer_cmd = PaliGemmaInference(
+        peft_model_path=str(paths.ACTION_CHECKPOINT),
+        base_model_id=base_model_id,
+    )
+    logger.info("Running inference for command...")
+    cmd_detections = inferencer_cmd.infer(
+        prompt=cmd_prompt, image_path=image_path_action_inf, classes=classes, mode="command"
+    )
+
+    input("Press Enter to proceed with robot execution...")
+
+    # 7. Execute the command on the robot (dry-run when --no-robot).
+    ur3 = UR3Commands(dry_run=args.no_robot)
+    command_line = cmd_detections.split('\n')[-1].strip()
+    logger.info("Sequence of commands to execute: %s", command_line)
+    try:
+        execute_command_sequence(ur3, command_line)
+    except Exception as e:
+        logger.error("Robot execution aborted: %s", e)
+        try:
+            ur3.disconnect()
+        except Exception:
+            pass
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

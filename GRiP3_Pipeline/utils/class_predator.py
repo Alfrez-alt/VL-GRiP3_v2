@@ -2,10 +2,14 @@
 import os
 import sys
 import subprocess
+import logging
 import numpy as np
 import open3d as o3d
 from PIL import Image
 import torch
+
+logger = logging.getLogger(__name__)
+
 
 class PredatorPipeline:
     def __init__(self,
@@ -70,7 +74,7 @@ class PredatorPipeline:
         # 6) save **only** the XYZ coords (N×3) into scene.pth
         arr = obj_xyz.astype(np.float32)
         torch.save(arr, self.pth_path)
-        print(f"[1] scene.pth saved: {self.pth_path} (shape={arr.shape})")
+        logger.info("[1] scene.pth saved: %s (shape=%s)", self.pth_path, arr.shape)
 
     def run_predator(self):
         # 1) avoid MKL/GOMP clash
@@ -94,7 +98,7 @@ class PredatorPipeline:
         src = os.path.join(demo_root, "Results", "merged.ply")
         if os.path.isfile(src):
             os.replace(src, self.ply_path)
-        print(f"[2] Predator registration done → {self.ply_path}")
+        logger.info("[2] Predator registration done -> %s", self.ply_path)
 
     def convert_npz(self):
         # 1) load merged.ply
@@ -114,7 +118,7 @@ class PredatorPipeline:
         np.savez(self.npz_path,
                  full_inputs=full_inputs,
                  full_seg=full_seg)
-        print(f"[3] NPZ saved: {self.npz_path} (shape={full_inputs.shape})")
+        logger.info("[3] NPZ saved: %s (shape=%s)", self.npz_path, full_inputs.shape)
 
     def run(self):
         self.build_scene_pth()

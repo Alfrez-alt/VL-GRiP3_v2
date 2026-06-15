@@ -3,11 +3,16 @@ from scipy.io.wavfile import write
 import numpy as np
 import whisper
 import os
+import logging
+
+from .paths import WHISPER_DIR
+
+logger = logging.getLogger(__name__)
 
 
 class WhisperTranscriber:
-    def __init__(self, output_dir="/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/whisper"):
-        self.output_dir = output_dir
+    def __init__(self, output_dir=None):
+        self.output_dir = str(output_dir) if output_dir is not None else str(WHISPER_DIR)
         os.makedirs(self.output_dir, exist_ok=True)
         self.wav_path = os.path.join(self.output_dir, "prompt.wav")
         # You can later add additional configuration parameters as needed.
@@ -25,25 +30,24 @@ class WhisperTranscriber:
             device_id = int(input("\n🔧 Enter the device ID for your microphone: "))
             sd.default.device = device_id
         except Exception as e:
-            print(f"Error selecting device: {e}")
+            logger.error("Error selecting device: %s", e)
             return ""
 
         # --- Step 3: Record from the selected device
-        print("\n🎙️ Recording... Speak now!")
+        logger.info("Recording... Speak now!")
         audio = sd.rec(int(duration * samplerate), samplerate=samplerate,
                        channels=channels, dtype='int16')
         sd.wait()
-        print("✅ Recording done.\n")
+        logger.info("Recording done.")
 
         # --- Step 4: Save WAV file
         write(self.wav_path, samplerate, audio)
-        print(f"💾 Audio saved at: {self.wav_path}")
+        logger.info("Audio saved at: %s", self.wav_path)
 
         # --- Step 5: Transcribe using Whisper
-        print("🔍 Loading Whisper model...")
+        logger.info("Loading Whisper model...")
         model = whisper.load_model("turbo")  # Options: "tiny", "small", "medium", "large", "turbo"
         result = model.transcribe(self.wav_path, language="en", temperature=0.0, task="transcribe")
         transcription = result["text"].strip()
-        print("\n📝 Transcription:")
-        print(transcription)
+        logger.info("Transcription: %s", transcription)
         return transcription

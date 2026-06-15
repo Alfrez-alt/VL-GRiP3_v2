@@ -1,47 +1,83 @@
 import json
 import time
-import sys
-import re
-import rtde_receive
+import math
+import logging
+
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
+from .robotiq_gripper_control import RobotiqGripper
+from .paths import SCENE_DIR, ROBOT_IP
+
+logger = logging.getLogger(__name__)
+
+# Conservative default Cartesian workspace (meters, robot base frame). This is a
+# safety guard against grossly invalid target poses, NOT a calibrated cell
+# boundary. Re-measure / tighten it for your own cell (e.g. a UR5e).
+DEFAULT_WORKSPACE_BOUNDS = {
+    "x": (-0.6, 0.6),
+    "y": (-0.6, 0.6),
+    "z": (-0.05, 0.6),
+}
+# Hard caps on Cartesian speed / acceleration to avoid dangerous fast motions.
+MAX_SPEED = 0.25          # m/s
+MAX_ACCELERATION = 0.5    # m/s^2
+
+
 class UR3Commands:
     """
-    UR3 Robotics Command Library via RTDE.
+    UR robot command library via RTDE.
+
+    The class name is kept for backwards compatibility, but it works with any
+    UR arm: set ``robot_ip``, the target/home poses and ``workspace_bounds`` for
+    your own cell (e.g. a UR5e — the bundled poses were calibrated for the
+    original UR3 cell and must be re-measured).
+
+    Safety features:
+        - Every Cartesian target is checked for NaN/inf and validated against a
+          workspace envelope before any motion is commanded.
+        - Speed / acceleration are clamped to MAX_SPEED / MAX_ACCELERATION.
+        - ``dry_run=True`` logs intended motions without commanding the robot, so
+          the full pipeline can be exercised end-to-end without hardware.
 
     Methods:
-        - connect(): Establish connection to the robot using a fixed IP.
-        - disconnect(): Close RTDE connections.
-        - move_to_pose(): Move the robot to a specified pose.
-        - move_to_grasping(): Read the pose from a JSON file and move the robot to that pose.
-        - move_to_target(): Move the robot to the specified target.
-            (Ignores the color parameter; uses the x,y position saved in the JSON file.)
-        - move_to_home(): Move the robot to the home configuration.
-        - gripper_open() / gripper_close(): Controls the opening/closing of the gripper.
-        - approach(): Performs a deapproach move (raising the z by 0.05 from the grasping pose).
-        - get_current_tcp_pose(), positive_shift(), negative_shift(): Operations on the current pose.
+        - connect() / disconnect(): manage the RTDE connection.
+        - move_to_pose(): validated Cartesian move.
+        - move_to_grasping() / move_to_target() / move_to_home(): task moves.
+        - gripper_open() / gripper_close(): gripper control.
+        - approach(): de-approach move (z + 0.05 from the grasping pose).
+        - get_current_tcp_pose(), positive_shift(), negative_shift().
     """
 
     def __init__(self, rtde_control_interface=None, rtde_receive_interface=None,
-                 move_delay=4.0,      # Waiting time after a movement
-                 gripper_delay=1.0):  # Waiting time after gripper operations
+                 robot_ip=None,
+                 dry_run=False,
+                 move_delay=4.0,       # wait after a movement
+                 gripper_delay=1.0,    # wait after a gripper operation
+                 speed=0.08,
+                 acceleration=0.1,
+                 workspace_bounds=None):
         """
-        :param rtde_control_interface: Instance of RTDEControlInterface (optional).
-        :param rtde_receive_interface: Instance of RTDEReceiveInterface (optional).
-        :param move_delay: Time to wait after each move command.
-        :param gripper_delay: Time to wait after each gripper command.
+        :param robot_ip: UR controller IP (defaults to paths.ROBOT_IP / env).
+        :param dry_run: if True, never command the robot; only log intended motions.
+        :param speed/acceleration: Cartesian limits (clamped to safe maxima).
+        :param workspace_bounds: dict {"x":(lo,hi),"y":(lo,hi),"z":(lo,hi)} in meters.
         """
         self.rtde_c = rtde_control_interface
         self.rtde_r = rtde_receive_interface
+        self.robot_ip = robot_ip or ROBOT_IP
+        self.dry_run = dry_run
         self.move_delay = move_delay
         self.gripper_delay = gripper_delay
 
-        # Velocity and acceleration parameters for Cartesian motions
-        self.speed = 0.08
-        self.acceleration = 0.1
+        # Velocity and acceleration parameters for Cartesian motions (clamped).
+        self.speed = min(speed, MAX_SPEED)
+        self.acceleration = min(acceleration, MAX_ACCELERATION)
 
-        # Fixed poses for targets
+        self.workspace_bounds = workspace_bounds or DEFAULT_WORKSPACE_BOUNDS
+
+        # Fixed poses for targets / home.
+        # NOTE: calibrated for the original UR3 cell — re-measure for your cell.
         self._yellow_target_pose = [0.3506093066335152, 0.026065163598190763, 0.08630217204639501,
                                      1.85011627085003, -2.538905414868407, -3.633083091122777e-05]
         self._green_target_pose = [0.3092810912107801, -0.16723593843130086, 0.08633799189949548,
@@ -57,196 +93,214 @@ class UR3Commands:
         # Variable for gripper (initialized after connection)
         self.gripper = None
 
+    # --------------------------- safety helpers ---------------------------
+    def _validate_pose(self, pose):
+        """Return True if ``pose`` is a finite 6-vector inside the workspace."""
+        if pose is None or len(pose) != 6:
+            logger.error("Invalid pose (expected 6 values): %r", pose)
+            return False
+        if any((v is None or not math.isfinite(v)) for v in pose):
+            logger.error("Pose contains NaN/inf, refusing to move: %r", pose)
+            return False
+        x, y, z = pose[0], pose[1], pose[2]
+        bx, by, bz = (self.workspace_bounds["x"],
+                      self.workspace_bounds["y"],
+                      self.workspace_bounds["z"])
+        if not (bx[0] <= x <= bx[1] and by[0] <= y <= by[1] and bz[0] <= z <= bz[1]):
+            logger.error("Target (x,y,z)=%s outside workspace bounds %s; refusing to move.",
+                         [x, y, z], self.workspace_bounds)
+            return False
+        return True
+
     def _init_gripper(self):
         try:
             self.gripper = RobotiqGripper(self.rtde_c)
-            print("[UR3Commands] Activating the gripper...")
+            logger.info("[UR3Commands] Activating the gripper...")
             self.gripper.activate()
             self.gripper.set_force(0)
             self.gripper.set_speed(30)
         except Exception as e:
-            print(f"[UR3Commands] Error initializing gripper: {e}")
+            logger.error("[UR3Commands] Error initializing gripper: %s", e)
             self.gripper = None
 
     def connect(self):
         """
-        Establishes connection with the robot using a static IP.
-        If the connection fails, the whole program is terminated.
+        Establish the RTDE connection. Raises on failure so the caller can abort
+        cleanly. In dry-run mode no real connection is opened.
         """
-        robot_ip = "192.168.1.254"  # IP address
+        robot_ip = self.robot_ip
+        if self.dry_run:
+            logger.info("[connect] dry-run: skipping real RTDE connection to %s.", robot_ip)
+            self.gripper = None
+            return
         try:
             self.rtde_c = RTDEControlInterface(robot_ip)
             self.rtde_r = RTDEReceiveInterface(robot_ip)
-
-            # Extra safety: check both interfaces
             if self.rtde_c is None or self.rtde_r is None:
-                print(f"[connect] RTDE interfaces not initialized correctly for {robot_ip}.")
-                print("[connect] Aborting pipeline because robot is not reachable.")
-                sys.exit(1)
-
-            print(f"[connect] Connection established with the robot {robot_ip}.")
+                raise RuntimeError(f"RTDE interfaces not initialized for {robot_ip}")
+            logger.info("[connect] Connection established with the robot %s.", robot_ip)
             self._init_gripper()
         except Exception as e:
-            print(f"[connect] Error connecting to robot {robot_ip}: {e}")
-            print("[connect] Aborting pipeline because robot is not reachable.")
-            sys.exit(1)
+            logger.error("[connect] Error connecting to robot %s: %s", robot_ip, e)
+            raise
 
     def disconnect(self):
-        """
-        Closes RTDE connections.
-        """
+        """Close RTDE connections."""
+        if self.dry_run:
+            logger.info("[disconnect] dry-run: nothing to disconnect.")
+            return
         if self.rtde_c is not None:
             self.rtde_c.stopScript()
             self.rtde_c.disconnect()
-            print("[disconnect] RTDEControlInterface disconnected.")
+            logger.info("[disconnect] RTDEControlInterface disconnected.")
         if self.rtde_r is not None:
             self.rtde_r.disconnect()
-            print("[disconnect] RTDEReceiveInterface disconnected.")
+            logger.info("[disconnect] RTDEReceiveInterface disconnected.")
 
     def _read_pose_from_json(self, file_path, pose_key):
-        """
-        Reads the pose associated with the given key from the JSON file.
-        :param file_path: Path to the JSON file.
-        :param pose_key: Key of the pose to extract.
-        :return: Pose as a list of 6 values or None.
-        """
+        """Read the pose associated with ``pose_key`` from a JSON file."""
         try:
             with open(file_path, "r") as f:
                 data = json.load(f)
             pose = data.get(str(pose_key), None)
             if pose is None:
-                print(f"Error: The pose with key '{pose_key}' is not defined in the JSON file.")
+                logger.error("The pose with key '%s' is not defined in %s.", pose_key, file_path)
             return pose
         except Exception as e:
-            print("Error reading JSON file:", e)
+            logger.error("Error reading JSON file %s: %s", file_path, e)
             return None
 
     def move_to_pose(self, pose, speed=None, acceleration=None):
         """
-        Moves the robot to the specified pose.
-        :param pose: List of 6 values [x, y, z, rx, ry, rz].
-        :param speed: Speed (default=self.speed).
-        :param acceleration: Acceleration (default=self.acceleration).
+        Move the robot to ``pose`` ([x, y, z, rx, ry, rz]) after validating it
+        against the workspace envelope. Speed/acceleration are clamped.
         """
-        actual_speed = speed if speed is not None else self.speed
-        actual_acceleration = acceleration if acceleration is not None else self.acceleration
-        print(f"[move_to_pose] Move to {pose} (speed={actual_speed}, accel={actual_acceleration})")
-        if self.rtde_c is not None:
+        actual_speed = min(speed if speed is not None else self.speed, MAX_SPEED)
+        actual_acceleration = min(
+            acceleration if acceleration is not None else self.acceleration, MAX_ACCELERATION
+        )
+        if not self._validate_pose(pose):
+            return
+        logger.info("[move_to_pose] Move to %s (speed=%s, accel=%s)",
+                    pose, actual_speed, actual_acceleration)
+        if self.dry_run:
+            logger.info("[move_to_pose] dry-run: motion not sent to robot.")
+            return
+        if self.rtde_c is None:
+            logger.error("[move_to_pose] Invalid RTDE connection!")
+            return
+        try:
             self.rtde_c.moveL(pose, actual_speed, actual_acceleration)
-        else:
-            print("[move_to_pose] Error: Invalid RTDE connection!")
+        except Exception as e:
+            logger.error("[move_to_pose] moveL failed: %s", e)
+            try:
+                self.rtde_c.stopL(2.0)
+            except Exception:
+                pass
+            return
         time.sleep(self.move_delay)
 
     def move_to_grasping(self):
-        """
-        Reads the grasping pose from a JSON file and moves the robot towards it.
-        """
-        pose_file = "/home/au-robotics/MircoProjects/Finale/pali/sample_data/real_world/XY/sorted_tcp_poses.json"
+        """Read the grasping pose from the scene JSON and move towards it."""
+        pose_file = str(SCENE_DIR / "sorted_tcp_poses.json")
         grasp_pose = self._read_pose_from_json(pose_file, self.default_grasp_pose_key)
         if grasp_pose is None:
-            print("Unable to perform move_to_grasping: Pose not available.")
+            logger.error("Unable to perform move_to_grasping: pose not available.")
             return
         self.move_to_pose(grasp_pose)
 
     def move_to_target(self, _ignored_color=None):
         """
-        Moves the robot to the target based on the target JSON file.
-        Reads the JSON file (/home/au-robotics/MircoProjects/VLAM/GRiP3_Pipeline/sample_data/real_world/99/target_pose.json)
-        extracting the x and y values. These values are then integrated with the current
-        pose obtained with get_current_tcp_pose() to keep z, rx, ry, rz unchanged.
+        Move to the target defined by the scene's target_pose.json (x, y only),
+        keeping the current z/rx/ry/rz, then lower z by 1.5 cm.
         """
-        target_json_path = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/target_pose.json"
+        target_json_path = str(SCENE_DIR / "target_pose.json")
         try:
             with open(target_json_path, "r") as f:
                 data = json.load(f)
-            # I take the first bearing and only x,y
+            # take the first detection and only x,y
             target_xy = data[0][:2]
         except Exception as e:
-            print(f"[move_to_target] Error reading target JSON file: {e}")
+            logger.error("[move_to_target] Error reading target JSON file %s: %s",
+                         target_json_path, e)
             return
 
         current_pose = self.get_current_tcp_pose()
         if current_pose is None:
-            print("[move_to_target] Unable to get current TCP pose.")
+            logger.error("[move_to_target] Unable to get current TCP pose.")
             return
 
         # 1) build and execute the usual move (swap in X,Y)
         new_pose = current_pose.copy()
         new_pose[0] = target_xy[0]
         new_pose[1] = target_xy[1]
-        print(f"[move_to_target] Move to the target(x,y): {new_pose}")
+        logger.info("[move_to_target] Move to the target (x,y): %s", new_pose)
         self.move_to_pose(new_pose)
 
-        # 2) now lower Z by 1 cm and execute that move
+        # 2) now lower Z by 1.5 cm and execute that move
         lowered_pose = new_pose.copy()
-        lowered_pose[2] -= 0.015  # 1 cm down
-        print(f"[move_to_target] Lowering of 1 cm along Z: {lowered_pose}")
+        lowered_pose[2] -= 0.015
+        logger.info("[move_to_target] Lowering by 1.5 cm along Z: %s", lowered_pose)
         self.move_to_pose(lowered_pose)
 
     def move_to_home(self):
-        """
-        Moves the robot to the home position.
-        """
-        print("[move_to_home] Moving to home configuration.")
+        """Move the robot to the home position."""
+        logger.info("[move_to_home] Moving to home configuration.")
         self.move_to_pose(self._home_pose)
 
     def gripper_open(self):
-        """
-        Open the gripper.
-        """
+        """Open the gripper."""
+        if self.dry_run:
+            logger.info("[gripper_open] dry-run: opening gripper (not sent).")
+            return
         if self.gripper is not None:
-            print("[gripper_open] Opening the gripper.")
+            logger.info("[gripper_open] Opening the gripper.")
             self.gripper.open()
         else:
-            print("[gripper_open] Error: gripper not initialized.")
+            logger.error("[gripper_open] gripper not initialized.")
         time.sleep(self.gripper_delay)
 
     def gripper_close(self):
-        """
-        Close the gripper.
-        """
+        """Close the gripper."""
+        if self.dry_run:
+            logger.info("[gripper_close] dry-run: closing gripper (not sent).")
+            return
         if self.gripper is not None:
-            print("[gripper_close] Closing the gripper.")
+            logger.info("[gripper_close] Closing the gripper.")
             self.gripper.close()
         else:
-            print("[gripper_close] Error: gripper not initialized.")
+            logger.error("[gripper_close] gripper not initialized.")
         time.sleep(self.gripper_delay)
 
     def approach(self):
-        """
-        Performs a deapproach motion: takes the grasping pose from the JSON and adds +0.05 to the z-coordinate.
-        """
-        pose_file = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/sorted_tcp_poses.json"
+        """De-approach move: grasping pose from the scene JSON with z + 0.05."""
+        pose_file = str(SCENE_DIR / "sorted_tcp_poses.json")
         grasp_pose = self._read_pose_from_json(pose_file, self.default_grasp_pose_key)
         if grasp_pose is None:
-            print("Unable to perform approach: Grasping pose not available.")
+            logger.error("Unable to perform approach: grasping pose not available.")
             return
         deapproach_pose = grasp_pose.copy()
         deapproach_pose[2] += 0.05
-        print(f"[approach] Deapproach movement towards the pose {deapproach_pose}")
+        logger.info("[approach] De-approach movement towards the pose %s", deapproach_pose)
         self.move_to_pose(deapproach_pose)
 
     def get_current_tcp_pose(self):
-        """
-        Returns the current TCP pose of the robot.
-        """
+        """Return the current TCP pose of the robot."""
+        if self.dry_run:
+            logger.info("[get_current_tcp_pose] dry-run: returning home pose as current.")
+            return list(self._home_pose)
         if self.rtde_r is not None:
             current_pose = self.rtde_r.getActualTCPPose()
-            print(f"[get_current_tcp_pose] The current pose is: {current_pose}")
+            logger.info("[get_current_tcp_pose] The current pose is: %s", current_pose)
             return current_pose
-        else:
-            print("[get_current_tcp_pose] Error: Invalid RTDE connection!")
-            return None
+        logger.error("[get_current_tcp_pose] Invalid RTDE connection!")
+        return None
 
     def positive_shift(self, axis, offset):
-        """
-        Performs a positive shift on the current pose along the specified axis.
-        :param axis: 'x', 'y' or 'z'
-        :param offset: Offset (in meters, positive value)
-        """
+        """Positive shift of the current pose along ``axis`` by ``offset`` (m)."""
         current_pose = self.get_current_tcp_pose()
         if current_pose is None:
-            print("Unable to get current pose for positive_shift.")
+            logger.error("Unable to get current pose for positive_shift.")
             return
         new_pose = current_pose.copy()
         if axis.lower() == "x":
@@ -256,20 +310,16 @@ class UR3Commands:
         elif axis.lower() == "z":
             new_pose[2] += offset
         else:
-            print("Axis not recognized for positive_shift.")
+            logger.error("Axis '%s' not recognized for positive_shift.", axis)
             return
-        print(f"[positive_shift] New pose after long positive shift {axis}: {new_pose}")
+        logger.info("[positive_shift] New pose after positive shift on %s: %s", axis, new_pose)
         self.move_to_pose(new_pose)
 
     def negative_shift(self, axis, offset):
-        """
-        Performs a negative shift on the current pose along the specified axis.
-        :param axis: 'x', 'y' or 'z'
-        :param offset: Offset (in meters, positive value)
-        """
+        """Negative shift of the current pose along ``axis`` by ``offset`` (m)."""
         current_pose = self.get_current_tcp_pose()
         if current_pose is None:
-            print("Unable to get current pose for negative_shift.")
+            logger.error("Unable to get current pose for negative_shift.")
             return
         new_pose = current_pose.copy()
         if axis.lower() == "x":
@@ -279,10 +329,7 @@ class UR3Commands:
         elif axis.lower() == "z":
             new_pose[2] -= offset
         else:
-            print("Axis not recognized for negative_shift.")
+            logger.error("Axis '%s' not recognized for negative_shift.", axis)
             return
-        print(f"[negative_shift] New pose after long negative shift {axis}: {new_pose}")
+        logger.info("[negative_shift] New pose after negative shift on %s: %s", axis, new_pose)
         self.move_to_pose(new_pose)
-
-
-#ADDED DE-APPOACH BEFORE OPENING GRIPPER

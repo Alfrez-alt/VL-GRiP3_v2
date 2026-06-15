@@ -2,12 +2,18 @@ import pyrealsense2 as rs
 import numpy as np
 import cv2
 import os
+import logging
+
+from .paths import SCENE_DIR
+
+logger = logging.getLogger(__name__)
+
 
 class RealSenseCapture:
     def __init__(
         self,
-        save_directory="/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX",
-        rgb_filename="rgn.png",
+        save_directory=None,
+        rgb_filename="rgb.png",
         depth_filename="depth.npy",
         resolution_width=640,
         resolution_height=480,
@@ -16,7 +22,8 @@ class RealSenseCapture:
         """
         Inizializza i parametri per la cattura da RealSense.
         """
-        self.save_directory = save_directory
+        # Default to the active scene dir (repo-relative, overridable via env).
+        self.save_directory = str(save_directory) if save_directory is not None else str(SCENE_DIR)
         self.rgb_filename = rgb_filename
         self.depth_filename = depth_filename
         self.resolution_width = resolution_width
@@ -56,15 +63,15 @@ class RealSenseCapture:
         # Avvia lo streaming
         try:
             profile = self.pipeline.start(self.config)
-            print("Streaming started. Press 's' to save the image and depth data, or 'ESC' to exit without saving.")
+            logger.info("Streaming started. Press 's' to save the image and depth data, or 'ESC' to exit without saving.")
         except Exception as e:
-            print(f"Failed to start the RealSense pipeline: {e}")
+            logger.error("Failed to start the RealSense pipeline: %s", e)
             return
 
         # Ottieni il depth scale per convertire i valori in metri
         depth_sensor = profile.get_device().first_depth_sensor()
         depth_scale = depth_sensor.get_depth_scale()  # ad es. 0.001 se i valori sono in millimetri
-        print(f"Depth Scale ottenuto: {depth_scale}")
+        logger.info("Depth scale: %s", depth_scale)
 
         try:
             while True:
@@ -102,27 +109,27 @@ class RealSenseCapture:
                 if key == ord('s'):
                     rgb_path = os.path.join(self.save_directory, self.rgb_filename)
                     cv2.imwrite(rgb_path, color_image)
-                    print(f"Saved RGB image to {rgb_path}")
+                    logger.info("Saved RGB image to %s", rgb_path)
 
                     depth_path = os.path.join(self.save_directory, self.depth_filename)
                     np.save(depth_path, depth_image)
-                    print(f"Saved depth data to {depth_path}")
+                    logger.info("Saved depth data to %s", depth_path)
 
                     break  # Esci dopo aver salvato
 
                 # Se l'utente preme ESC (27), esci senza salvare
                 elif key == 27:  # ESC
-                    print("Exiting without saving.")
+                    logger.info("Exiting without saving.")
                     break
 
         except Exception as e:
-            print(f"An error occurred: {e}")
+            logger.error("An error occurred during capture: %s", e)
 
         finally:
             # Ferma lo streaming e chiudi le finestre
             self.pipeline.stop()
             cv2.destroyAllWindows()
-            print("Stream stopped and windows closed.")
+            logger.info("Stream stopped and windows closed.")
 
 # Per eseguire la cattura
 if __name__ == "__main__":

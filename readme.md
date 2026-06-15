@@ -46,12 +46,28 @@ Clone and follow the official setup instructions for:
 - [OverlapPredator](https://github.com/prs-eth/OverlapPredator)
 - [M2T2](https://github.com/NVlabs/M2T2)
 
-Clone our repository and install the dependencies:
+Set up a **Python 3.10** environment (the stack is pinned around 3.10; on Ubuntu
+24.04, 3.10 is available via the `deadsnakes` PPA):
 
 ```bash
-git clone https://github.com/AU-DK-Robotics/VL-GRiP3.git
-cd VL-GRiP3
+sudo add-apt-repository ppa:deadsnakes/ppa
+sudo apt update
+sudo apt install python3.10 python3.10-venv python3.10-dev
+
+git clone <your-fork-url> VL-GRiP3_v2
+cd VL-GRiP3_v2
+python3.10 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+
+# 1) PyTorch matched to your CUDA toolkit (tested: CUDA 12.1)
+pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cu121
+
+# 2) the rest of the dependencies
 pip install -r requirements.txt
+
+# 3) the pointnet2_ops CUDA extension (built from the vendored M2T2 copy)
+pip install ./M2T2/pointnet2_ops
 ```
 
 ## Checkpoints
@@ -69,16 +85,40 @@ cd OverlapPredator/weights
 
 
 ## Run
-After creating the virtual environment, preparing the dataset, and training PaliGemma and Predator, VL-GRiP3 can be run with::
+After creating the virtual environment, preparing the dataset, and training PaliGemma and Predator, VL-GRiP3 can be run with:
 
 ```bash
-
 python main.py
 ```
-If you want to use OpenAI Whisper module, please run:
+
+Useful command-line flags:
+
 ```bash
-python main_whisper.py
+python main.py --voice         # acquire the prompt via OpenAI Whisper (speech-to-text)
+python main.py --no-capture    # skip RealSense capture and reuse existing scene files
+python main.py --no-robot      # DRY-RUN: run the full pipeline but never command the robot
+python main.py --log-level DEBUG
+python main_whisper.py         # thin shim, equivalent to: python main.py --voice
 ```
+
+### Configuration (no hardcoded paths)
+
+Paths are resolved relative to the repository root, so the project runs from any
+clone location. Override the defaults with environment variables when needed:
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `VLGRIP3_SCENE_DIR` | active scene / working directory | bundled `sample_data/real_world/MX` |
+| `VLGRIP3_ROBOT_IP`  | UR controller IP | `192.168.1.254` |
+| `VLGRIP3_CHECKPOINTS` | PaliGemma PEFT checkpoints dir | `GRiP3_Pipeline/checkpoints` |
+| `VLGRIP3_PREDATOR` | OverlapPredator install dir | `OverlapPredator/` |
+| `VLGRIP3_LOGLEVEL` | logging verbosity | `INFO` |
+
+> **Robot safety / different arm:** the bundled target/home poses, workspace
+> bounds and IP were calibrated for the original **UR3** cell. If you use a
+> different arm (e.g. a **UR5e**), re-measure the poses and adjust
+> `workspace_bounds` / `ROBOT_IP`. Motions are validated against a workspace
+> envelope and speed/acceleration are clamped; use `--no-robot` to dry-run first.
 
 Example command and repository directory tree:
 
