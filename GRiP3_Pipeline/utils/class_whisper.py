@@ -4,9 +4,11 @@ import numpy as np
 import whisper
 import os
 
+from .paths import GRIP3_PIPELINE_DIR
+
 
 class WhisperTranscriber:
-    def __init__(self, output_dir="/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/whisper"):
+    def __init__(self, output_dir=str(GRIP3_PIPELINE_DIR / "whisper")):
         self.output_dir = output_dir
         os.makedirs(self.output_dir, exist_ok=True)
         self.wav_path = os.path.join(self.output_dir, "prompt.wav")

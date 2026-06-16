@@ -1,21 +1,49 @@
-import pyrealsense2 as rs
-import numpy as np
-import cv2
+"""RGB-D capture for the Orbbec Gemini 2L camera (via the pyorbbecsdk).
+
+Drop-in replacement for the previous RealSense grabber: it streams aligned
+color + depth, lets the user preview the scene, and on key 's' saves
+``rgb.png`` (BGR, 8-bit) and ``depth.npy`` (float32, in metres) into the sample
+directory expected by the rest of the pipeline.
+
+NOTE (validate on hardware): the exact stream profiles, the color pixel format
+and the depth scale are device/SDK dependent. The defaults below follow the
+standard pyorbbecsdk usage for the Gemini 2L; adjust if your unit reports a
+different format. The camera intrinsics should ultimately be read from the
+device (or from a calibration) rather than hard-coded downstream.
+"""
 import os
 
-class RealSenseCapture:
+import numpy as np
+import cv2
+
+try:
+    from pyorbbecsdk import (
+        Pipeline, Config, OBSensorType, OBFormat, OBStreamType, AlignFilter,
+    )
+    _HAS_ORBBEC = True
+except Exception:  # pragma: no cover - depends on environment
+    _HAS_ORBBEC = False
+
+from .paths import SAMPLE_DIR
+
+
+class OrbbecCapture:
     def __init__(
         self,
-        save_directory="/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX",
-        rgb_filename="rgn.png",
+        save_directory=str(SAMPLE_DIR),
+        rgb_filename="rgb.png",
         depth_filename="depth.npy",
         resolution_width=640,
         resolution_height=480,
-        fps=30
+        fps=30,
     ):
-        """
-        Inizializza i parametri per la cattura da RealSense.
-        """
+        """Initialize the capture parameters for the Orbbec Gemini 2L."""
+        if not _HAS_ORBBEC:
+            raise ImportError(
+                "pyorbbecsdk is not installed. Install the Orbbec SDK Python "
+                "bindings to use OrbbecCapture (Gemini 2L)."
+            )
+
         self.save_directory = save_directory
         self.rgb_filename = rgb_filename
         self.depth_filename = depth_filename
@@ -23,82 +51,107 @@ class RealSenseCapture:
         self.resolution_height = resolution_height
         self.fps = fps
 
-        # Creazione della cartella di salvataggio se non esiste
+        # Create the output directory if it does not exist.
         os.makedirs(self.save_directory, exist_ok=True)
 
-        # Configura il pipeline e le opzioni di streaming
-        self.pipeline = rs.pipeline()
-        self.config = rs.config()
-        self.config.enable_stream(
-            rs.stream.depth,
-            self.resolution_width,
-            self.resolution_height,
-            rs.format.z16,
-            self.fps
-        )
-        self.config.enable_stream(
-            rs.stream.color,
-            self.resolution_width,
-            self.resolution_height,
-            rs.format.bgr8,
-            self.fps
-        )
+        # Configure the pipeline and the streaming options.
+        self.pipeline = Pipeline()
+        self.config = Config()
 
-        # Creiamo un oggetto per allineare il frame di depth al frame di colore.
-        self.align = rs.align(rs.stream.color)
+        # Color stream (request RGB; converted to BGR before saving for OpenCV).
+        color_profiles = self.pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
+        try:
+            color_profile = color_profiles.get_video_stream_profile(
+                self.resolution_width, self.resolution_height, OBFormat.RGB, self.fps
+            )
+        except Exception:
+            # TODO(hardware): fall back to the device default if the exact
+            # (resolution, format, fps) combination is not supported.
+            color_profile = color_profiles.get_default_video_stream_profile()
+        self.config.enable_stream(color_profile)
+
+        # Depth stream (16-bit).
+        depth_profiles = self.pipeline.get_stream_profile_list(OBSensorType.DEPTH_SENSOR)
+        try:
+            depth_profile = depth_profiles.get_video_stream_profile(
+                self.resolution_width, self.resolution_height, OBFormat.Y16, self.fps
+            )
+        except Exception:
+            depth_profile = depth_profiles.get_default_video_stream_profile()
+        self.config.enable_stream(depth_profile)
+
+        # Align the depth frame to the color frame.
+        self.align = AlignFilter(align_to_stream=OBStreamType.COLOR_STREAM)
+
+    @staticmethod
+    def _color_to_bgr(color_frame):
+        """Convert an Orbbec color frame to a BGR uint8 image for OpenCV."""
+        h = color_frame.get_height()
+        w = color_frame.get_width()
+        fmt = color_frame.get_format()
+        buf = np.frombuffer(color_frame.get_data(), dtype=np.uint8)
+        if fmt == OBFormat.RGB:
+            return cv2.cvtColor(buf.reshape(h, w, 3), cv2.COLOR_RGB2BGR)
+        if fmt == OBFormat.BGR:
+            return buf.reshape(h, w, 3)
+        if fmt == OBFormat.MJPG:
+            return cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        # TODO(hardware): handle other formats (YUYV, etc.) if the device uses them.
+        raise ValueError(f"Unsupported Orbbec color format: {fmt}")
 
     def run_capture(self):
-        """
-        Avvia la cattura da RealSense. Mostra l'immagine a schermo e
-        attende la pressione di 's' per salvare (e poi terminare) o ESC
-        per uscire senza salvare.
-        """
-        # Avvia lo streaming
+        """Start the Orbbec stream, preview frames, and save on 's' (ESC to quit)."""
         try:
-            profile = self.pipeline.start(self.config)
+            self.pipeline.start(self.config)
             print("Streaming started. Press 's' to save the image and depth data, or 'ESC' to exit without saving.")
         except Exception as e:
-            print(f"Failed to start the RealSense pipeline: {e}")
+            print(f"Failed to start the Orbbec pipeline: {e}")
             return
-
-        # Ottieni il depth scale per convertire i valori in metri
-        depth_sensor = profile.get_device().first_depth_sensor()
-        depth_scale = depth_sensor.get_depth_scale()  # ad es. 0.001 se i valori sono in millimetri
-        print(f"Depth Scale ottenuto: {depth_scale}")
 
         try:
             while True:
-                # Attendi un set di frame (depth e color)
-                frames = self.pipeline.wait_for_frames()
-                # Allinea il frame di depth al frame color
-                aligned_frames = self.align.process(frames)
-                depth_frame = aligned_frames.get_depth_frame()
-                color_frame = aligned_frames.get_color_frame()
-                if not depth_frame or not color_frame:
+                # Wait for a frame set (depth and color).
+                frames = self.pipeline.wait_for_frames(100)
+                if frames is None:
+                    continue
+                # Align the depth frame to the color frame.
+                frames = self.align.process(frames)
+                if frames is None:
+                    continue
+                frames = frames.as_frame_set()
+                color_frame = frames.get_color_frame()
+                depth_frame = frames.get_depth_frame()
+                if color_frame is None or depth_frame is None:
                     continue
 
-                # Converti i frame in array NumPy
-                raw_depth = np.asanyarray(depth_frame.get_data())
-                color_image = np.asanyarray(color_frame.get_data())
+                # Convert frames to NumPy arrays.
+                color_image = self._color_to_bgr(color_frame)
 
-                # Converti il depth in metri
-                depth_image = raw_depth.astype(np.float32) * depth_scale
+                dh = depth_frame.get_height()
+                dw = depth_frame.get_width()
+                # Orbbec depth values are in units of `depth_scale` millimetres.
+                depth_scale = depth_frame.get_depth_scale()
+                raw_depth = np.frombuffer(depth_frame.get_data(), dtype=np.uint16).reshape(dh, dw)
 
-                # (Opzionale) Crea una mappa di colori per la depth per visualizzare meglio i dettagli
-                # Qui moltiplichiamo per 255 se vogliamo visualizzare come immagine (questa parte non altera i dati salvati)
+                # Convert depth to metres.
+                depth_image = raw_depth.astype(np.float32) * depth_scale / 1000.0
+
+                # (Optional) colormap of the depth for a clearer preview
+                # (this does not alter the saved data).
+                max_d = depth_image.max()
                 depth_colormap = cv2.applyColorMap(
-                    cv2.convertScaleAbs(depth_image, alpha=255/depth_image.max()),
-                    cv2.COLORMAP_JET
+                    cv2.convertScaleAbs(depth_image, alpha=255 / max_d if max_d > 0 else 1.0),
+                    cv2.COLORMAP_JET,
                 )
 
-                # Mostra a schermo le immagini color e depth
-                cv2.imshow('RealSense - Color', color_image)
-                cv2.imshow('RealSense - Depth', depth_colormap)
+                # Show the color and depth images.
+                cv2.imshow('Orbbec Gemini 2L - Color', color_image)
+                cv2.imshow('Orbbec Gemini 2L - Depth', depth_colormap)
 
-                # Gestione input da tastiera
+                # Handle keyboard input.
                 key = cv2.waitKey(1) & 0xFF
 
-                # Se l'utente preme 's', salva e termina
+                # On 's', save and stop.
                 if key == ord('s'):
                     rgb_path = os.path.join(self.save_directory, self.rgb_filename)
                     cv2.imwrite(rgb_path, color_image)
@@ -108,10 +161,10 @@ class RealSenseCapture:
                     np.save(depth_path, depth_image)
                     print(f"Saved depth data to {depth_path}")
 
-                    break  # Esci dopo aver salvato
+                    break  # Exit after saving.
 
-                # Se l'utente preme ESC (27), esci senza salvare
-                elif key == 27:  # ESC
+                # On ESC (27), exit without saving.
+                elif key == 27:
                     print("Exiting without saving.")
                     break
 
@@ -119,12 +172,13 @@ class RealSenseCapture:
             print(f"An error occurred: {e}")
 
         finally:
-            # Ferma lo streaming e chiudi le finestre
+            # Stop the stream and close the windows.
             self.pipeline.stop()
             cv2.destroyAllWindows()
             print("Stream stopped and windows closed.")
 
-# Per eseguire la cattura
+
+# Run the capture
 if __name__ == "__main__":
-    capture = RealSenseCapture()
+    capture = OrbbecCapture()
     capture.run_capture()

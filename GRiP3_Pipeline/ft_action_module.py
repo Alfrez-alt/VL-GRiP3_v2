@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from typing import List, Dict, Any
 from PIL import Image
 import torch
@@ -16,23 +17,28 @@ from transformers import BitsAndBytesConfig
 # ------------------------------------------------------------------------------
 # DATASET PATHS
 # ------------------------------------------------------------------------------
-TRAIN_IMAGES_DIR = "/GRiP3_Pipeline/utils/dataset/train_basic_cmd"
-TRAIN_ANNOTATIONS = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/utils/dataset/train_basic_cmd/annotations_train.jsonl"
+# Repo-relative dataset location (edit _DATASET_DIR if your data lives elsewhere).
+_DATASET_DIR = Path(__file__).resolve().parent / "utils" / "dataset" / "train_basic_cmd"
+TRAIN_IMAGES_DIR = str(_DATASET_DIR)
+TRAIN_ANNOTATIONS = str(_DATASET_DIR / "annotations_train.jsonl")
 
-VALID_IMAGES_DIR = "/GRiP3_Pipeline/utils/dataset/train_basic_cmd"
-VALID_ANNOTATIONS = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/utils/dataset/train_basic_cmd/annotations_valid.jsonl"
+VALID_IMAGES_DIR = str(_DATASET_DIR)
+VALID_ANNOTATIONS = str(_DATASET_DIR / "annotations_valid.jsonl")
+
+# Repo-relative output directory for the trained adapter.
+_OUTPUT_DIR = Path(__file__).resolve().parent / "checkpoints" / "paligemma-action-module"
 
 # ------------------------------------------------------------------------------
 # LOCAL JSONL DATASET CLASS
 # ------------------------------------------------------------------------------
 class JSONLDataset(Dataset):
     """
-    Legge un file JSONL e carica le immagini dalla cartella locale.
-    Ogni riga deve contenere:
+    Reads a JSONL file and loads images from the local folder.
+    Each line must contain:
     {
       "image": "filename.jpg",
-      "prefix": "testo di input",
-      "suffix": "output atteso (token di segmentazione + comandi robotici)"
+      "prefix": "input text",
+      "suffix": "expected output (segmentation tokens + robot commands)"
     }
     """
     def __init__(self, jsonl_file_path: str, image_directory_path: str):
@@ -71,14 +77,14 @@ valid_dataset = JSONLDataset(jsonl_file_path=VALID_ANNOTATIONS, image_directory_
 # ------------------------------------------------------------------------------
 # LOAD PROCESSOR
 # ------------------------------------------------------------------------------
-model_id = "google/paligemma-3b-mix-448"  # Scegli il modello desiderato
+model_id = "google/paligemma-3b-mix-448"  # Choose the desired model
 processor = PaliGemmaProcessor.from_pretrained(model_id)
 
 # ------------------------------------------------------------------------------
 # CUSTOM COLLATE FUNCTION
 # ------------------------------------------------------------------------------
 def collate_fn(examples: List[Dict[str, Any]]):
-    # Aggiungi il token <image> all'inizio del testo per indicare input multimodale.
+    # Prepend the <image> token to signal multi-modal input.
     texts = [f"<image>{ex['prefix']}" for ex in examples]
     images = [ex["image"] for ex in examples]
     targets = [ex["suffix"] for ex in examples]
@@ -91,7 +97,7 @@ def collate_fn(examples: List[Dict[str, Any]]):
         padding="longest"
     )
 
-    # Converti i tensori floating-point in bfloat16 e sposta tutto sul device.
+    # Cast floating-point tensors to bfloat16 and move everything to the device.
     for key, value in batch.items():
         if value.dtype in [torch.float32, torch.float64]:
             batch[key] = value.to(torch.bfloat16).to(device)
@@ -103,8 +109,8 @@ def collate_fn(examples: List[Dict[str, Any]]):
 # LORA / QLoRA CONFIGURATION AND DEVICE SETUP
 # ------------------------------------------------------------------------------
 USE_LORA = False
-USE_QLORA = True   # Usa QLoRA se desiderato
-# Imposta FREEZE_VISION a True per congelare la parte visiva (non allenare la segmentazione)
+USE_QLORA = True   # Use QLoRA if desired
+# Set FREEZE_VISION to True to freeze the visual backbone (do not train segmentation).
 FREEZE_VISION = True
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -142,12 +148,12 @@ else:
         torch_dtype=torch.bfloat16,
     ).to(device)
 
-# ---- FREEZING DEL MODULO VISIVO ----
+# ---- FREEZING THE VISION MODULE ----
 if FREEZE_VISION and hasattr(model, "vision_tower"):
-    # Congela la vision tower: le feature visive non verranno aggiornate
+    # Freeze the vision tower: the visual features will not be updated.
     for param in model.vision_tower.parameters():
         param.requires_grad = False
-    # Se esiste, congela anche il multi_modal_projector
+    # If present, freeze the multi_modal_projector as well.
     if hasattr(model, "multi_modal_projector"):
         for param in model.multi_modal_projector.parameters():
             param.requires_grad = False
@@ -156,13 +162,13 @@ if FREEZE_VISION and hasattr(model, "vision_tower"):
 # TRAINING ARGUMENTS
 # ------------------------------------------------------------------------------
 args = TrainingArguments(
-    num_train_epochs=10,                        # Dataset piccolo, quindi meno epoch
+    num_train_epochs=10,                        # Small dataset, hence fewer epochs
     remove_unused_columns=False,
     per_device_train_batch_size=1,
     per_device_eval_batch_size=1,
-    gradient_accumulation_steps=8,              # Batch virtuale più grande per stabilità
-    warmup_steps=20,                            # Warmup più lungo per una transizione graduale
-    learning_rate=3e-5,                         # Learning rate leggermente ridotto
+    gradient_accumulation_steps=8,              # Larger virtual batch for stability
+    warmup_steps=20,                            # Longer warmup for a gradual transition
+    learning_rate=3e-5,                         # Slightly reduced learning rate
     weight_decay=1e-6,
     adam_beta2=0.999,
     logging_steps=10,
@@ -170,8 +176,8 @@ args = TrainingArguments(
     eval_strategy="epoch",
     save_strategy="epoch",
     save_total_limit=3,
-    push_to_hub=True,                         # Se non vuoi pubblicare su hub, metti False
-    output_dir="/checkpoints/paligemma-action-module",
+    push_to_hub=True,                         # Set to False if you do not want to push to the hub
+    output_dir=str(_OUTPUT_DIR),
     bf16=True,
     report_to=["tensorboard"],
     dataloader_pin_memory=False,
@@ -199,4 +205,4 @@ trainer.train()
 print("Training completed.")
 
 
-#FINE-TUNING ROBOTIC COMMAND SCRIPT.
+# FINE-TUNING ROBOTIC COMMAND SCRIPT.

@@ -1,5 +1,6 @@
 import os
 import json
+from pathlib import Path
 from typing import List, Dict, Any
 from PIL import Image
 import torch
@@ -16,11 +17,16 @@ from transformers import BitsAndBytesConfig
 # ------------------------------------------------------------------------------
 # DATASET PATHS
 # ------------------------------------------------------------------------------
-TRAIN_IMAGES_DIR = "/GRiP3_Pipeline/dataset/training_dataset_segmentation"  # <-- modificali col tuo path
-TRAIN_ANNOTATIONS = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/dataset/training_dataset_segmentation/annotations_train.jsonl"
+# Repo-relative dataset location (edit _DATASET_DIR if your data lives elsewhere).
+_DATASET_DIR = Path(__file__).resolve().parent / "dataset" / "training_dataset_segmentation"
+TRAIN_IMAGES_DIR = str(_DATASET_DIR)
+TRAIN_ANNOTATIONS = str(_DATASET_DIR / "annotations_train.jsonl")
 
-VALID_IMAGES_DIR = "/GRiP3_Pipeline/dataset/training_dataset_segmentation"
-VALID_ANNOTATIONS = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/dataset/training_dataset_segmentation/annotations_valid.jsonl"
+VALID_IMAGES_DIR = str(_DATASET_DIR)
+VALID_ANNOTATIONS = str(_DATASET_DIR / "annotations_valid.jsonl")
+
+# Repo-relative output directory for the trained adapter.
+_OUTPUT_DIR = Path(__file__).resolve().parent / "checkpoints" / "paligemma-segm-module"
 
 # ------------------------------------------------------------------------------
 # LOCAL JSONL DATASET CLASS
@@ -71,7 +77,7 @@ valid_dataset = JSONLDataset(jsonl_file_path=VALID_ANNOTATIONS, image_directory_
 # ------------------------------------------------------------------------------
 # LOAD PROCESSOR
 # ------------------------------------------------------------------------------
-model_id = "google/paligemma-3b-mix-448"  # Scegli il modello PaliGemma desiderato
+model_id = "google/paligemma-3b-mix-448"  # Choose the desired PaliGemma model
 processor = PaliGemmaProcessor.from_pretrained(model_id)
 
 # ------------------------------------------------------------------------------
@@ -101,13 +107,13 @@ def collate_fn(examples: List[Dict[str, Any]]):
 # ------------------------------------------------------------------------------
 # LORA / QLoRA CONFIGURATION AND DEVICE SETUP
 # ------------------------------------------------------------------------------
-USE_LORA = True    # Cambia a True se vuoi LoRA
-USE_QLORA = False    # Cambia a True se vuoi QLoRA
-FREEZE_VISION = True  # Congela la vision tower
+USE_LORA = True    # Set to True to use LoRA
+USE_QLORA = False    # Set to True to use QLoRA
+FREEZE_VISION = True  # Freeze the vision tower
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Definiamo una config LoRA (vale sia per LoRA che QLoRA)
+# Define a LoRA config (used for both LoRA and QLoRA)
 lora_config = LoraConfig(
     r=8,
     target_modules=[
@@ -138,12 +144,12 @@ if USE_LORA or USE_QLORA:
             torch_dtype=torch.bfloat16,
         )
 
-    # Avvolgiamo il modello con la LoRA
+    # Wrap the model with LoRA
     model = get_peft_model(base_model, lora_config)
     model = model.to(device)
     model.print_trainable_parameters()
 else:
-    # Nessun LoRA
+    # No LoRA
     model = PaliGemmaForConditionalGeneration.from_pretrained(
         model_id,
         device_map="auto",
@@ -151,38 +157,38 @@ else:
     ).to(device)
 
 # ------------------------------------------------------------------------------
-# OPZIONE: Congelare la vision tower, ma lasciare allenabile il multi_modal_projector
+# OPTION: freeze the vision tower but keep the multi_modal_projector trainable
 # ------------------------------------------------------------------------------
 if FREEZE_VISION and hasattr(model, "vision_tower"):
     for param in model.vision_tower.parameters():
         param.requires_grad = False
-    # IMPORTANTE: lasciare sbloccato (non congelo) multi_modal_projector,
-    # per adattare le feature al tuo caso di segmentazione
+    # IMPORTANT: keep the multi_modal_projector unfrozen (not frozen),
+    # to adapt the features to your segmentation case.
     # if hasattr(model, "multi_modal_projector"):
     #     for param in model.multi_modal_projector.parameters():
-    #         param.requires_grad = False  # <-- COMMENTATO PER LASCIARLO SBLOCCATO
+    #         param.requires_grad = False  # <-- COMMENTED OUT TO KEEP IT UNFROZEN
 
 # ------------------------------------------------------------------------------
 # TRAINING ARGUMENTS
 # ------------------------------------------------------------------------------
 args = TrainingArguments(
-    num_train_epochs=15,                  # 10-20 epoche su dataset piccolo
+    num_train_epochs=15,                  # 10-20 epochs on a small dataset
     remove_unused_columns=False,
     per_device_train_batch_size=1,
     per_device_eval_batch_size=1,
-    gradient_accumulation_steps=4,        # per un eff. batchsize maggiore
-    warmup_steps=50,                      # un po' di warmup in più su dataset piccolo
-    learning_rate=1e-5,                   # LR più basso per stabilità
+    gradient_accumulation_steps=4,        # for a larger effective batch size
+    warmup_steps=50,                      # a bit more warmup on a small dataset
+    learning_rate=1e-5,                   # lower LR for stability
     weight_decay=1e-6,
     adam_beta2=0.999,
     logging_steps=10,
-    # Se stai usando QLoRA, potresti cambiare in: optim="paged_adamw_8bit"
+    # If you are using QLoRA, you may switch to: optim="paged_adamw_8bit"
     optim="adamw_hf",
     eval_strategy="epoch",
     save_strategy="epoch",
     save_total_limit=3,
     push_to_hub=True,
-    output_dir="checkpoints/paligemma-segm-module",
+    output_dir=str(_OUTPUT_DIR),
     bf16=True,
     report_to=["tensorboard"],
     dataloader_pin_memory=False,
@@ -209,4 +215,4 @@ print("Starting training...")
 trainer.train()
 print("Training completed.")
 
-#TUNING CUSTOM PART FOR OBJ SEGMENTATION
+# TUNING CUSTOM PART FOR OBJ SEGMENTATION

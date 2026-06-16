@@ -3,11 +3,14 @@ import re
 import time
 import sys
 from GRiP3_Pipeline.utils.class_m2t2 import M2T2Inference
-from GRiP3_Pipeline.utils.class_robot_library import UR3Commands
-from GRiP3_Pipeline.utils.class_get_snap_mm import RealSenseCapture
+from GRiP3_Pipeline.utils.class_robot_library import UR5eCommands
+from GRiP3_Pipeline.utils.class_get_snap_mm import OrbbecCapture
 from GRiP3_Pipeline.utils.class_predator import PredatorPipeline
-import torch  # Per svuotare la cache GPU (se usi PyTorch)
+import torch  # To clear the GPU cache (if using PyTorch)
 from GRiP3_Pipeline.utils.class_paligemma import PaliGemmaInference
+from GRiP3_Pipeline.utils.paths import (
+    SAMPLE_DIR, CHECKPOINTS_DIR, OVERLAP_PREDATOR_DIR, GRIP3_PIPELINE_DIR,
+)
 
 def process_user_prompt(user_prompt: str):
     # 1) Extract the command verb and object for segmentation.
@@ -65,12 +68,12 @@ def process_user_prompt(user_prompt: str):
     return object_seg_prompt, None, command_prompt
 
 if __name__ == "__main__":
-    # 1. Capture the scene using RealSense.
-    capture_dir = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX"
+    # 1. Capture the scene using the Orbbec Gemini 2L.
+    capture_dir = str(SAMPLE_DIR)
     rgb_filename = "rgb.png"
     depth_filename = "depth.npy"
 
-    capture = RealSenseCapture(
+    capture = OrbbecCapture(
         save_directory=capture_dir,
         rgb_filename=rgb_filename,
         depth_filename=depth_filename,
@@ -99,13 +102,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     image_path = os.path.join(capture_dir, rgb_filename)
-    image_path_action_inf = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/utils/dataset/train_basic_cmd/1.jpg"
+    image_path_action_inf = str(GRIP3_PIPELINE_DIR / "utils" / "dataset" / "train_basic_cmd" / "1.jpg")
     seg_output_path = os.path.join(capture_dir, "segmentation_overlay.png")
     seg_output_path_target = os.path.join(capture_dir, "detection_target_overlay.png")
     classes = ["cylinder", "cube", "prism", "triangle"]
 
     # 3. Run segmentation inference.
-    seg_model_path = "GRiP3_Pipeline/checkpoints/paligemma-segm-module"
+    seg_model_path = str(CHECKPOINTS_DIR / "paligemma-segm-module")
     inferencer = PaliGemmaInference(
         peft_model_path=seg_model_path,
         base_model_id="google/paligemma-3b-mix-448"
@@ -136,7 +139,7 @@ if __name__ == "__main__":
     # 4. Registration via PredatorPipeline
     input("Press Enter to proceed with registration...")
 
-    cfg_base = "/home/au-robotics/MircoProjects/VL_GRiP3/OverlapPredator/configs/test"
+    cfg_base = str(OVERLAP_PREDATOR_DIR / "configs" / "test")
 
     cad_cfg_map = {
         "tac1": os.path.join(cfg_base, "vl_grip3_tac1.yaml"),
@@ -154,7 +157,7 @@ if __name__ == "__main__":
     while True:
         pipeline = PredatorPipeline(
             sample_dir=capture_dir,
-            predator_script="/home/au-robotics/MircoProjects/VL_GRiP3/OverlapPredator/scripts/demo_save.py",
+            predator_script=str(OVERLAP_PREDATOR_DIR / "scripts" / "demo_save.py"),
             predator_cfg=predator_cfg_path,
             label=101,
         )
@@ -174,7 +177,7 @@ if __name__ == "__main__":
             break
 
     # 6. Run command inference.
-    cmd_model_path = "GRiP3_Pipeline/checkpoints/paligemma-action-module"
+    cmd_model_path = str(CHECKPOINTS_DIR / "paligemma-action-module")
     inferencer_cmd = PaliGemmaInference(
         peft_model_path=cmd_model_path,
         base_model_id="google/paligemma-3b-mix-448"
@@ -195,7 +198,7 @@ if __name__ == "__main__":
     from rtde_control import RTDEControlInterface
     from rtde_receive import RTDEReceiveInterface
 
-    ur3 = UR3Commands()
+    robot = UR5eCommands()
 
     # Example command string:
     # "connect ; approach ; gripper open ; grasp ; gripper close ; approach ; target(red) ; gripper open ; home pose ; disconnect"
@@ -203,11 +206,11 @@ if __name__ == "__main__":
     print("Sequence of commands to execute:", command_line)
 
     command_mapping = {
-        "gripper open": ur3.gripper_open,
-        "gripper close": ur3.gripper_close,
-        "grasp": ur3.move_to_grasping,
-        "approach": ur3.approach,
-        "home pose": ur3.move_to_home,
+        "gripper open": robot.gripper_open,
+        "gripper close": robot.gripper_close,
+        "grasp": robot.move_to_grasping,
+        "approach": robot.approach,
+        "home pose": robot.move_to_home,
     }
 
     commands = [cmd.strip() for cmd in command_line.split(';') if cmd.strip()]
@@ -217,11 +220,11 @@ if __name__ == "__main__":
 
         if normalized_cmd == "connect":
             print("Running the command: connect")
-            ur3.connect()
+            robot.connect()
 
         elif normalized_cmd == "disconnect":
             print("Executing the command: disconnect")
-            ur3.disconnect()
+            robot.disconnect()
 
         elif normalized_cmd.startswith("positive(") or normalized_cmd.startswith("negative("):
             pattern_shift = r"^(positive|negative)\(\s*([xyz])\s*,\s*([\d\.]+)\s*\)$"
@@ -235,20 +238,20 @@ if __name__ == "__main__":
                     continue
                 print(f"Executing the command: {cmd}")
                 if shift_type.lower() == "positive":
-                    ur3.positive_shift(axis, offset)
+                    robot.positive_shift(axis, offset)
                 else:
-                    ur3.negative_shift(axis, offset)
+                    robot.negative_shift(axis, offset)
             else:
                 print(f"Invalid shift command format: {cmd}")
 
         elif normalized_cmd.startswith("target("):
             # Ignore any parameter. Just call move_to_target()
             print("Executing the target command (ignoring parameter)")
-            ur3.move_to_target()
+            robot.move_to_target()
 
         elif normalized_cmd == "target":
             print("Executing the target command")
-            ur3.move_to_target()
+            robot.move_to_target()
 
         elif normalized_cmd in command_mapping:
             print(f"Executing the command: {cmd}")

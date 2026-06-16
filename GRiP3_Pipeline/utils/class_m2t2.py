@@ -15,6 +15,8 @@ from .m2t2.train_utils import to_cpu, to_gpu
 from pathlib import Path
 from omegaconf import OmegaConf
 
+from .paths import SAMPLE_DIR
+
 class M2T2Inference:
     def __init__(self, cfg=None):
         here = Path(__file__).resolve().parent
@@ -24,9 +26,9 @@ class M2T2Inference:
             cfg = OmegaConf.load(str(cfg_path))
         self.cfg = cfg
 
-        # Hard-utils the 4 parameters (overriding any CLI overrides)
+        # Force the 4 eval parameters (overriding any CLI overrides)
         self.cfg.eval.checkpoint = str(here / "m2t2.pth")
-        self.cfg.eval.data_dir   = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX"
+        self.cfg.eval.data_dir   = str(SAMPLE_DIR)
         self.cfg.eval.mask_thresh = 0.55
         self.cfg.eval.num_runs    = 5
 
@@ -70,7 +72,7 @@ class M2T2Inference:
 
         # Load the non-occluded object point cloud.
         obj_data = np.load(
-            "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/full_object_pointcloud.npz"
+            str(SAMPLE_DIR / "full_object_pointcloud.npz")
         )
         obj_inputs = obj_data['full_inputs']
         obj_seg = obj_data['full_seg']
@@ -260,20 +262,20 @@ class M2T2Inference:
                 for placement, conf in zip(best_placements, best_placement_conf)
             ]
 
-        output_filename_alt = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/best_poses.json"
+        output_filename_alt = str(SAMPLE_DIR / "best_poses.json")
         with open(output_filename_alt, "w") as f:
             json.dump(best_poses, f, indent=2)
-        print(f"Salvato '{output_filename_alt}'.")
-        sorted_output_file = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/sorted_tcp_poses.json"
+        print(f"Saved '{output_filename_alt}'.")
+        sorted_output_file = str(SAMPLE_DIR / "sorted_tcp_poses.json")
         self.generate_sorted_tcp_poses(output_filename_alt, sorted_output_file)
-        print(f"Generato '{sorted_output_file}'.")
+        print(f"Generated '{sorted_output_file}'.")
         if best_poses["task"] == "pick":
             for i, grasp in enumerate(best_poses["grasps"]):
                 print(f"Pose {i + 1}: confidence = {grasp['confidence']}")
         else:
             for i, placement in enumerate(best_poses["placements"]):
                 print(f"Placement {i + 1}: confidence = {placement['confidence']}")
-        print("Inferenza M2T2 completata.")
+        print("M2T2 inference completed.")
 
 
 @hydra.main(config_path='.', config_name='config', version_base='1.3')

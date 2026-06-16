@@ -16,6 +16,8 @@ import json
 
 from huggingface_hub import hf_hub_download
 
+from .paths import SAMPLE_DIR
+
 # ---- Libraries for PyTorch / Transformers / PEFT ----
 import torch
 from peft import PeftModel, PeftConfig
@@ -250,10 +252,12 @@ class PaliGemmaInference:
 
             # ---------------- New utils: Compute & Save 3D Target Poses ----------------
             # Load depth image (assumed in meters)
-            depth_path = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/depth.npy"
+            depth_path = str(SAMPLE_DIR / "depth.npy")
             depth_image = np.load(depth_path)
 
             # Provided extrinsics (camera_pose) and intrinsic parameters.
+            # TODO(calibration): placeholder values from the original RealSense setup;
+            # replace with the Orbbec Gemini 2L extrinsics/intrinsics for your rig.
             camera_pose = np.array([[7.7483457e-01, -4.2044988e-01, 4.7207338e-01, -1.5715596e-01],
                                     [-6.3216394e-01, -5.1492232e-01, 5.7898515e-01, -5.9072340e-01],
                                     [-3.5311221e-04, -7.4704546e-01, -6.6477287e-01, 2.2176746e-01],
@@ -289,7 +293,7 @@ class PaliGemmaInference:
                 target_poses.append(robot_coords.tolist())
 
             # Save the target poses to a JSON file.
-            json_save_path = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/target_pose.json"
+            json_save_path = str(SAMPLE_DIR / "target_pose.json")
             with open(json_save_path, "w") as json_file:
                 json.dump(target_poses, json_file, indent=2)
             print(f"Target poses saved to: {json_save_path}")

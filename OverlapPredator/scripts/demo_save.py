@@ -13,6 +13,10 @@ import open3d as o3d
 
 cwd = os.getcwd()
 sys.path.append(cwd)
+
+# Location-independent anchor: <repo>/OverlapPredator (parent of this scripts/ dir).
+PRED_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PRED_ROOT)
 from datasets.indoor import IndoorDataset
 from datasets.dataloader_limits import get_dataloader
 from models.architectures import KPFCNN
@@ -188,7 +192,7 @@ def main(config, demo_loader):
         # --------------------------------------------------
         # SAVE merged cloud (.ply)
         # --------------------------------------------------
-        out_dir = "/home/au-robotics/MircoProjects/VL_GRiP3/OverlapPredator/Results"
+        out_dir = os.path.join(PRED_ROOT, "Results")
         os.makedirs(out_dir, exist_ok=True)
 
         # dtype‑safe conversion (float32)
@@ -222,6 +226,15 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     config = edict(load_config(args.config))
+
+    # Resolve any relative config paths against the OverlapPredator root so the
+    # YAML configs stay portable (no machine-specific absolute paths required).
+    def _abs(p):
+        return p if os.path.isabs(p) else os.path.normpath(os.path.join(PRED_ROOT, p))
+    for _key in ('pretrain', 'root', 'train_info', 'val_info', 'src_pcd', 'tgt_pcd'):
+        if config.get(_key):
+            config[_key] = _abs(config[_key])
+
     config.device = torch.device('cuda' if config.get('gpu_mode', False) else 'cpu')
 
     # build architecture list

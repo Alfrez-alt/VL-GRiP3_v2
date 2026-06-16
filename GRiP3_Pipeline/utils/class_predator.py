@@ -30,7 +30,9 @@ class PredatorPipeline:
         self.pred_cfg     = predator_cfg
         self.label        = label
 
-        # camera intrinsics
+        # Camera intrinsics (fx, fy, cx, cy).
+        # TODO(calibration): placeholder values from the original RealSense setup;
+        # replace with the Orbbec Gemini 2L intrinsics for your unit.
         self.fx, self.fy, self.cx, self.cy = (
             606.0859375, 605.17205811, 310.45910645, 252.21199036
         )

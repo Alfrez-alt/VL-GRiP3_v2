@@ -6,9 +6,11 @@ import rtde_receive
 from rtde_control import RTDEControlInterface
 from rtde_receive import RTDEReceiveInterface
 
-class UR3Commands:
+from .paths import SAMPLE_DIR
+
+class UR5eCommands:
     """
-    UR3 Robotics Command Library via RTDE.
+    UR5e Robotics Command Library via RTDE.
 
     Methods:
         - connect(): Establish connection to the robot using a fixed IP.
@@ -60,12 +62,12 @@ class UR3Commands:
     def _init_gripper(self):
         try:
             self.gripper = RobotiqGripper(self.rtde_c)
-            print("[UR3Commands] Activating the gripper...")
+            print("[UR5eCommands] Activating the gripper...")
             self.gripper.activate()
             self.gripper.set_force(0)
             self.gripper.set_speed(30)
         except Exception as e:
-            print(f"[UR3Commands] Error initializing gripper: {e}")
+            print(f"[UR5eCommands] Error initializing gripper: {e}")
             self.gripper = None
 
     def connect(self):
@@ -141,7 +143,7 @@ class UR3Commands:
         """
         Reads the grasping pose from a JSON file and moves the robot towards it.
         """
-        pose_file = "/home/au-robotics/MircoProjects/Finale/pali/sample_data/real_world/XY/sorted_tcp_poses.json"
+        pose_file = str(SAMPLE_DIR / "sorted_tcp_poses.json")
         grasp_pose = self._read_pose_from_json(pose_file, self.default_grasp_pose_key)
         if grasp_pose is None:
             print("Unable to perform move_to_grasping: Pose not available.")
@@ -151,11 +153,11 @@ class UR3Commands:
     def move_to_target(self, _ignored_color=None):
         """
         Moves the robot to the target based on the target JSON file.
-        Reads the JSON file (/home/au-robotics/MircoProjects/VLAM/GRiP3_Pipeline/sample_data/real_world/99/target_pose.json)
+        Reads the target pose JSON (SAMPLE_DIR/target_pose.json)
         extracting the x and y values. These values are then integrated with the current
         pose obtained with get_current_tcp_pose() to keep z, rx, ry, rz unchanged.
         """
-        target_json_path = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/target_pose.json"
+        target_json_path = str(SAMPLE_DIR / "target_pose.json")
         try:
             with open(target_json_path, "r") as f:
                 data = json.load(f)
@@ -216,7 +218,7 @@ class UR3Commands:
         """
         Performs a deapproach motion: takes the grasping pose from the JSON and adds +0.05 to the z-coordinate.
         """
-        pose_file = "/home/au-robotics/MircoProjects/VL_GRiP3/GRiP3_Pipeline/sample_data/real_world/MX/sorted_tcp_poses.json"
+        pose_file = str(SAMPLE_DIR / "sorted_tcp_poses.json")
         grasp_pose = self._read_pose_from_json(pose_file, self.default_grasp_pose_key)
         if grasp_pose is None:
             print("Unable to perform approach: Grasping pose not available.")

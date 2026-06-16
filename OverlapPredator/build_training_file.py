@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Rigenera sempre (sovrascrive) i file di output per tac1, tac2 e tac3:
+Always regenerate (overwrite) the output files for tac1, tac2 and tac3:
   • training/CAD/tacX_ok.pth
   • training/tacX/tacX_*.pth
-  • configs/indoor/train_info.pkl   (tutti gli oggetti)
-  • configs/indoor/val_info.pkl     (tutti gli oggetti)
+  • configs/indoor/train_info.pkl   (all objects)
+  • configs/indoor/val_info.pkl     (all objects)
 
-Per tac1: 15 coppie train
-Per tac2: 10 coppie train
-Per tac3: 18 coppie train
-Il resto in validation.
+tac1: 15 train pairs
+tac2: 10 train pairs
+tac3: 18 train pairs
+The rest go to validation.
 """
 import os, glob, pickle
 import numpy as np
@@ -17,10 +17,10 @@ import open3d as o3d
 import torch
 
 # CONFIG -----------------------------------------------
-ROOT = "/home/au-robotics/MircoProjects/Predator/OverlapPredator/training"
+ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "training")
 CAD_DIR = os.path.join(ROOT, "CAD")
 OBJECTS = [("tac1", 64), ("tac2", 68), ("tac3", 54)]  # (object_name, n_train)
-N_POINTS = 55000  # punti da campionare se mesh
+N_POINTS = 55000  # points to sample if the input is a mesh
 
 
 # -------------------------------------------------------

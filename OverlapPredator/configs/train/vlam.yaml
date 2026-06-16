@@ -63,7 +63,7 @@ optimiser:
 dataset:
   dataset: indoor
   benchmark: 3DMatch
-  root: /home/au-robotics/MircoProjects/Predator/OverlapPredator/training
+  root: training
   batch_size: 1
   num_workers: 6
   augment_noise: 0.005
