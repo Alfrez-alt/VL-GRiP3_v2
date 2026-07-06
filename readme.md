@@ -1,7 +1,7 @@
 # VL-GRiP3: A Hierarchical Pipeline Leveraging Vision-Language Models for Autonomous Robotic 3D Grasping
 
 This repository represents the official implementation of the paper:
-Paper: [Title of my paper](https://YOUR-LINK-HERE)
+Paper: [Title of my paper](https://www.sciencedirect.com/science/article/pii/S0736584526000232)
 
 
 VL_GRiP3 is an end-to-end pipeline for **vision–language-driven grasping** on a UR3 robot with a Robotiq gripper.
